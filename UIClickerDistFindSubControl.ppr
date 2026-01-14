@@ -39,7 +39,7 @@ uses
 
   ClickerTemplates, MQTTClient, MQTTUtils, MQTTConnectCtrl, MQTTSubscribeCtrl,
   MQTTUnsubscribeCtrl, MemArchive, DistFindSubControlPluginProperties,
-  ClickerPluginInMemFileSystem, ClickerPrimitives,
+  ClickerPluginInMemFileSystem, ClickerPrimitives, ClickerActionPluginAccess,
   DistFindSubControlPropertyEditorForm, FontSorting;
 
 type
@@ -1400,36 +1400,13 @@ procedure GetListOfProperties(APluginReference: Pointer;                 //UICli
                               AOnActionPlugin_UpdatePropertyIcons: TOnActionPlugin_UpdatePropertyIcons); cdecl;
 var
   Properties: string;
-  i: Integer;
-  TempMemStream: TMemoryStream;
-  Bmp: TBitmap;
 begin
   Properties := FillInPropertyDetails;
   AListOfPropertiesLen^ := SetPointedContentFromString(Properties, AListOfProperties);
 
   dmProperties := TdmProperties.Create(nil);
   try
-    for i := 0 to CPropertiesCount - 1 do
-    begin
-      TempMemStream := TMemoryStream.Create;
-      Bmp := TBitmap.Create;
-      try
-        Bmp.PixelFormat := pf24bit;
-        Bmp.Width := dmProperties.imglstProperties.Width;
-        Bmp.Height := dmProperties.imglstProperties.Height;
-        Bmp.Canvas.Pen.Color := clWhite;
-        Bmp.Canvas.Brush.Color := clWhite;
-        Bmp.Canvas.Rectangle(0, 0, Bmp.Width, Bmp.Height);
-
-        dmProperties.imglstProperties.Draw(Bmp.Canvas, 0, 0, i, dsNormal, itImage);
-        Bmp.SaveToStream(TempMemStream);
-
-        AOnActionPlugin_UpdatePropertyIcons(APluginReference, TempMemStream.Memory, TempMemStream.Size);
-      finally
-        TempMemStream.Free;
-        Bmp.Free;
-      end;
-    end;
+    UpdatePropertyIcons(APluginReference, AOnActionPlugin_UpdatePropertyIcons, dmProperties.imglstProperties, CPropertiesCount);
   finally
     dmProperties.Free;
   end;
@@ -2115,40 +2092,6 @@ begin
 end;
 
 
-procedure HandleOnFileContent(ACallReference, AStreamContent: Pointer; AStreamSize: Int64); cdecl;
-var
-  TempStream: TMemoryStream;
-  DestBmp: TBitmap;
-begin
-  if AStreamSize <= 0 then
-    Exit;
-
-  DestBmp := TBitmap(ACallReference); //created by caller
-
-  TempStream := TMemoryStream.Create;
-  try
-    TempStream.SetSize(AStreamSize);
-    Move(AStreamContent^, TempStream.Memory^, AStreamSize);
-    DestBmp.LoadFromStream(TempStream, AStreamSize);
-  finally
-    TempStream.Free;
-  end;
-end;
-
-
-procedure HandleOnFileContentAsRawStream(ACallReference, AStreamContent: Pointer; AStreamSize: Int64); cdecl;
-var
-  DestMemStream: TMemoryStream;
-begin
-  if AStreamSize <= 0 then
-    Exit;
-
-  DestMemStream := TMemoryStream(ACallReference); //created by caller
-  DestMemStream.SetSize(AStreamSize);
-  Move(AStreamContent^, DestMemStream.Memory^, AStreamSize);
-end;
-
-
 function ExecutePlugin(APluginReference: Pointer;
                        AListOfPluginSettings: Pointer;
                        AListOfPluginSettingsLen: PDWord;
@@ -2185,22 +2128,6 @@ var
     AOnActionPlugin_SetTemplateVar(APluginReference, @AVarName[1], @AVarValue[1]);
   end;
 
-  procedure GetActionInfoByIndex(AIndex: Integer; out AActionName: string; var AActionType: DWord);
-  var
-    Buffer: string;
-    ActionNamePtr: Pointer;
-    NameLengthDWord: DWord;
-  begin
-    SetLength(Buffer, CMaxSharedStringLength + 1);
-    ActionNamePtr := @Buffer[1];
-    NameLengthDWord := 0;
-
-    AActionName := '';
-    AOnActionPlugin_GetActionInfoByIndex(APluginReference, AIndex, ActionNamePtr, @NameLengthDWord, @AActionType);
-    SetPointedContentToString(ActionNamePtr, AActionName);
-    SetLength(AActionName, NameLengthDWord);
-  end;
-
   procedure GetAllTemplateVars(out AAllTemplateVars: string);  //AAllTemplateVars are encoded as CRLF separated key=value strings, ready to be used on a TStringlist
   var
     Buffer: string;
@@ -2225,73 +2152,11 @@ var
     SetLength(Result, AListOfPluginSettingsLen^);
   end;
 
-  function BitmapIsAllowedToBeLoaded(AFnm: string; out ADenyReason: string): Boolean;
-  var
-    TempFileProvider: TFileProvider;
-    FullTemplatesDir, AllowedFileDirsForServer, AllowedFileExtensionsForServer: string;
-    FullTemplatesDirPtr, AllowedFileDirsForServerPtr, AllowedFileExtensionsForServerPtr: Pointer;
-  begin
-    TempFileProvider := TFileProvider.Create;
-    try
-      SetLength(FullTemplatesDir, CMaxSharedStringLength + 1);
-      SetLength(AllowedFileDirsForServer, CMaxSharedStringLength + 1);
-      SetLength(AllowedFileExtensionsForServer, CMaxSharedStringLength + 1);
-
-      FullTemplatesDirPtr := @FullTemplatesDir[1];
-      AllowedFileDirsForServerPtr := @AllowedFileDirsForServer[1];
-      AllowedFileExtensionsForServerPtr := @AllowedFileExtensionsForServer[1];
-
-      AOnActionPlugin_GetAllowedFilesInfo(APluginReference, FullTemplatesDirPtr, AllowedFileDirsForServerPtr, AllowedFileExtensionsForServerPtr);
-      FullTemplatesDir := Copy(FullTemplatesDir, 1, Pos(#0, FullTemplatesDir) - 1);
-      AllowedFileDirsForServer := Copy(AllowedFileDirsForServer, 1, Pos(#0, AllowedFileDirsForServer) - 1);
-      AllowedFileExtensionsForServer := Copy(AllowedFileExtensionsForServer, 1, Pos(#0, AllowedFileExtensionsForServer) - 1);
-
-      TempFileProvider.FullTemplatesDir := FullTemplatesDir;
-
-      TempFileProvider.AddListOfAccessibleDirs(AllowedFileDirsForServer);
-      TempFileProvider.AddListOfAccessibleFileExtensions(AllowedFileExtensionsForServer);
-
-      Result := TempFileProvider.FileIsAllowed(AFnm, ADenyReason);
-    finally
-      TempFileProvider.Free;
-    end;
-  end;
-
-  function LoadBitmap(AListOfAllVars: TStringList; AFnm: string; ADestBmp: TBitmap; AFileLocation: TImageSourceFileNameLocation): Boolean;
-  var
-    TempDenyReason: string;
-  begin
-    AFnm := EvaluateAllReplacements(AListOfAllVars, AFnm);
-
-    if BitmapIsAllowedToBeLoaded(AFnm, TempDenyReason) then                                      //isflDisk=0, isflMem=1
-      Result := AOnActionPlugin_LoadBitmap(APluginReference, @AFnm[1], ADestBmp, Ord(AFileLocation), @HandleOnFileContent)
-    else
-      Result := False;
-  end;
-
-  function LoadBitmapAsStream(AListOfAllVars: TStringList; AFnm: string; AMemStream: TMemoryStream; AFileLocation: TImageSourceFileNameLocation): Boolean;
-  var
-    TempDenyReason: string;
-    IsPmtv: Byte;
-  begin
-    AFnm := EvaluateAllReplacements(AListOfAllVars, AFnm);
-
-    if BitmapIsAllowedToBeLoaded(AFnm, TempDenyReason) then                                      //isflDisk=0, isflMem=1
-    begin
-      IsPmtv := Ord(UpperCase(ExtractFileExt(AFnm)) = '.PMTV') shl 3;  //use bit 3 for "DoNotRender" flag, to reserve bits 2 and 1 for future use.
-      Result := AOnActionPlugin_LoadBitmap(APluginReference, @AFnm[1], AMemStream, Ord(AFileLocation) or IsPmtv, @HandleOnFileContentAsRawStream)
-    end
-    else
-    begin
-      AddToLog('Bitmap/pmtv is not allowed to be loaded: "' + AFnm + '"   ' + TempDenyReason + '   ImgSrc: ' + CImageSourceFileNameLocationStr[AFileLocation]);
-      Result := False;
-    end;
-  end;
-
   procedure GenerateSomeResultImg(AListOfAllVars: TStringList);
   var
     TempBmp, BkBmp: TBitmap;
     TempStream: TMemoryStream;
+    TempFnm: string;
   begin
     TempBmp := TBitmap.Create;
     BkBmp := TBitmap.Create;
@@ -2302,7 +2167,15 @@ var
       TempBmp.Canvas.Brush.Color := clBlack;
       TempBmp.Canvas.Pen.Color := clBlack;
 
-      if LoadBitmap(AListOfAllVars, ExtractFilePath(ParamStr(0)) + 'Tests\TestFiles\Gradient30deg.bmp', BkBmp, isflDisk) then
+      TempFnm := ExtractFilePath(ParamStr(0)) + 'Tests\TestFiles\Gradient30deg.bmp';
+      if LoadBitmap(APluginReference,
+                    AOnActionPlugin_GetAllowedFilesInfo,
+                    AOnActionPlugin_LoadBitmap,
+                    AOnActionPlugin_AddToLog,
+                    AListOfAllVars,
+                    TempFnm,
+                    BkBmp,
+                    isflDisk) then
         TempBmp.Canvas.Draw(50, 25, BkBmp);
 
       TempBmp.Canvas.Font.Color := clYellow;
@@ -2416,7 +2289,7 @@ var
     try
       ASourceFileName := CScreenshotFilename;
 
-      if LoadBitmapAsStream(AListOfAllVars, ASourceFileName, PreBk, BkFileNameLocation) then
+      if LoadBitmapAsStream(APluginReference, AOnActionPlugin_GetAllowedFilesInfo, AOnActionPlugin_LoadBitmap, AOnActionPlugin_AddToLog, AListOfAllVars, ASourceFileName, PreBk, BkFileNameLocation) then
       begin
         if AImageSource = '0' then  //isScreenshot
         begin
@@ -2426,7 +2299,7 @@ var
 
         TempBk := TMemoryStream.Create;
         try
-          if LoadBitmapAsStream(AListOfAllVars, ASourceFileName, TempBk, BkFileNameLocation) then
+          if LoadBitmapAsStream(APluginReference, AOnActionPlugin_GetAllowedFilesInfo, AOnActionPlugin_LoadBitmap, AOnActionPlugin_AddToLog, AListOfAllVars, ASourceFileName, TempBk, BkFileNameLocation) then
           begin
             if PreBk.Size = TempBk.Size then
               if CompareMem(PreBk.Memory, TempBk.Memory, PreBk.Size) then
@@ -2478,7 +2351,7 @@ var
 
     TempBk := TMemoryStream.Create;
     try
-      if LoadBitmapAsStream(AListOfAllVars, ASourceFileName, TempBk, BkFileNameLocation) then
+      if LoadBitmapAsStream(APluginReference, AOnActionPlugin_GetAllowedFilesInfo, AOnActionPlugin_LoadBitmap, AOnActionPlugin_AddToLog, AListOfAllVars, ASourceFileName, TempBk, BkFileNameLocation) then
       begin
         ABackgroundSize := TempBk.Size;
         //BkHash := ComputeHash(TempBk.Memory, TempBk.Size);
@@ -2600,7 +2473,7 @@ var
               if Pos('$APPDIR$', UpperCase(Fnm)) = 1 then //do not expand for other vars, because the path will result in double expansion, e.g. "C:\UIClicker\$TestFilesDir$\WinOnlyFonts.pmtv", where $TestFilesDir$ already contains "C:\UIClickerDistFindSubControlPlugin\Tests".
                 Fnm := ExpandFileName(Fnm);
 
-            if LoadBitmapAsStream(AListOfAllVars, Fnm, TempMemFile, FileLoc) then
+            if LoadBitmapAsStream(APluginReference, AOnActionPlugin_GetAllowedFilesInfo, AOnActionPlugin_LoadBitmap, AOnActionPlugin_AddToLog, AListOfAllVars, Fnm, TempMemFile, FileLoc) then
             begin
               TempFilesToSend.Strings[j] := ResolveTemplatePath(TempFilesToSend.Strings[j]);
 
@@ -2631,7 +2504,7 @@ var
                           if Pos('$APPDIR$', UpperCase(BmpFnm)) = 1 then //do not expand for other vars, because the path will result in double expansion, e.g. "C:\UIClicker\$TestFilesDir$\Win.bmp", where $TestFilesDir$ already contains "C:\UIClickerDistFindSubControlPlugin\Tests".
                             BmpFnm := ExpandFileName(BmpFnm);
 
-                        if LoadBitmapAsStream(AListOfAllVars, BmpFnm, UsedBmpTempMemFile, FileLoc) then
+                        if LoadBitmapAsStream(APluginReference, AOnActionPlugin_GetAllowedFilesInfo, AOnActionPlugin_LoadBitmap, AOnActionPlugin_AddToLog, AListOfAllVars, BmpFnm, UsedBmpTempMemFile, FileLoc) then
                         begin
                           BmpsInPmtv.Strings[k] := ResolveTemplatePath(BmpsInPmtv.Strings[k]);
 
@@ -2805,7 +2678,7 @@ var
             if Pos('$APPDIR$', UpperCase(Fnm)) = 1 then //do not expand for other vars, because the path will result in double expansion, e.g. "C:\UIClicker\$TestFilesDir$\WinOnlyFonts.pmtv", where $TestFilesDir$ already contains "C:\UIClickerDistFindSubControlPlugin\Tests".
               Fnm := ExpandFileName(Fnm);  //The use of ExpandFileName requires more testing.
 
-          if LoadBitmapAsStream(AListOfAllVars, Fnm, TempMemFile, FileLoc) then
+          if LoadBitmapAsStream(APluginReference, AOnActionPlugin_GetAllowedFilesInfo, AOnActionPlugin_LoadBitmap, AOnActionPlugin_AddToLog, AListOfAllVars, Fnm, TempMemFile, FileLoc) then
           begin
             TempMemFile.Position := 0;
             PmtvIni := TClkIniReadonlyFile.Create(TempMemFile);
@@ -3503,7 +3376,7 @@ begin
       IndexOfFindSubControlActionProperty := -1;
       for i := 0 to ActionCount - 1 do
       begin
-        GetActionInfoByIndex(i, s, ActionTypeDWord);
+        GetActionInfoByIndex(APluginReference, AOnActionPlugin_GetActionInfoByIndex, i, s, ActionTypeDWord);
 
         if VerbLevel < 2 then
           AddToLog('Found action [' + IntToStr(i) + ']: ' + s);
